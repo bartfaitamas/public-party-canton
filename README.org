@@ -1,0 +1,307 @@
+* Party on Two Participant Nodes
+
+This example is using Daml SDK 2.6.x.
+
+This is an example canton setup implementing the public reference data
+pattern in a multi-node Canton setup. The public reference data is
+maintained by a central admin party, but it is accessible to all
+participants in the domain.
+
+See also:
+https://docs.daml.com/canton/usermanual/identity_management.html#party-on-two-nodes.
+
+** Overview
+   There are two participant nodes and three parties configured in this
+   example:
+
+   - *Central*: The main participant node
+     - centralAdmin party: The main party, which is the admin for the
+       reference data
+     - referenceDataReader party: party, which has read access to the reference
+       data
+     - centralAdminUser: actAs centralAdmin, *actAs referenceDataReader*
+   - *TraderOne*: A participant which wants to access reference data
+     - traderOneAdmin party: a party on TraderOne
+     - traderOneAdminUser: actAs tradeOneAdmin, *readAs referenceDataReader*
+
+   The example uses a canton configuration where identity management
+   is used, users are authenticated with JWT tokens, etc.
+
+   This document is a walk through for all the steps needed, but there
+   are scripts under the ~bin~ folder implementing the necessary
+   steps.
+
+
+** Project structure
+   - *config* This folder contains the canton configuration and
+     bootstrap scripts for each node.
+   - *docker-compose.yml*: Contains the whole setup with postgres
+     database, the domain node, and the two participant nodes.
+   - *daml* Folder containing the daml code
+   - *bin* Shell scripts implementing the below runbook
+   - *bin/tmux-session.sh*: A tmux script to create a new tmux
+     session, where the central participant is started with docker
+     compose
+
+** Runbook
+*** Compile the daml project
+    #+begin_src sh
+      daml build
+    #+end_src
+
+*** Key generation
+    ~./bin/generate_participant_keys.sh~
+    (Note: ignore the ~<<script_header>>~ parts in the below code examples)
+
+    First we need to generate the keys for the participant nodes,
+    which will be used for the JWT tokens.
+
+    #+name: script_header
+    #+begin_src sh :exports none
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      ROOT_DIR=$SCRIPT_DIR/..
+      cd $ROOT_DIR
+
+    #+end_src
+
+    #+begin_src sh :tangle bin/generate_participant_keys.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<script_header>>
+      openssl req -nodes -new -x509 -keyout "config/central/api.key" -out "config/central/api.crt"
+      openssl req -nodes -new -x509 -keyout "config/traderOne/api.key" -out "config/traderOne/api.crt"
+    #+end_src
+
+*** Start the central participant
+    Now we can start the central participant using docker.
+
+    Note: You can also use the ~bin/tmux-session.sh~ script to create
+    a tmux session for the various docker-compose operations.
+
+    #+begin_src sh
+      docker compose up -d central
+      docker logs -f
+    #+end_src
+
+
+**** Canton bootstrap
+     When a participant starts, it executes the canton bootstrap
+     script, in this case [[file:config/central/canton.bootstrap][config/central/canton.bootstrap]]. This
+     bootstrap script does the following:
+     - Creates both parties on central
+     - Creates the admin user
+     - Uploads the project dar file
+     - Generates the file ~config/central/participant-config.json~
+
+     The latter file will be used in our scripts the extract party
+     identifiers
+
+*** Create a JWT token for the centralAdminUser
+    ~./bin/create_user_token.sh central centralAdminUser~
+
+    In this step we create the JWT token, which will be used to
+    authenticate the centralAdminUser to the ledger API.
+
+    #+name: jwt_script_header
+    #+begin_src sh :exports none
+      PARTICIPANT_NAME=$1
+      PARTICIPANT_USER=$2
+
+      SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+      ROOT_DIR=$SCRIPT_DIR/..
+      cd $ROOT_DIR
+    #+end_src
+
+    #+begin_src sh
+      export PARTICIPANT_NAME=central
+      export PARTICIPANT_USER=centralAdminUser
+    #+end_src
+
+    #+begin_src sh :tangle bin/create_user_token.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<jwt_script_header>>
+
+      PARTICIPANT_DIR=config/$PARTICIPANT_NAME
+      PARTICIPANT_ID=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"${PARTICIPANT_NAME}:\")) | .key" ${PARTICIPANT_DIR}/participant-config.json)
+
+      CLAIM=$(echo -n "{\"aud\":\"https://daml.com/jwt/aud/participant/${PARTICIPANT_ID}\",\"sub\":\"${PARTICIPANT_USER}\"}" | base64 -w0 | sed s/\+/-/g |sed 's/\//_/g' |  sed -E s/=+$//)
+      HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 -w0 | sed s/\+/-/g | sed 's/\//_/g' | sed -E s/=+$//)
+      SIGNATURE=$(echo -n "${HEADER}.${CLAIM}" |  openssl dgst -sha256 -sign "config/${PARTICIPANT_NAME}/api.key" -binary | base64 -w0 | sed s/\+/-/g | sed 's/\//_/g' | sed -E s/=+$//)
+
+      echo "${HEADER}.${CLAIM}.${SIGNATURE}" > ${PARTICIPANT_USER}.jwt
+    #+end_src
+*** Initialize the central admin
+    ~./bin/init_central_admin.sh~
+
+    The below snippet calls the [[file:daml/CentralAdmin.daml][CentralAdmin:initCentralAdmin]] daml
+    script to create the CentralAdmin Role contract, which will be
+    used to create reference data contracts.
+
+    Additionally we also create some reference data.
+
+    The script's input are the parties required for this contract. We
+    extract the parties from the ~participant-config.json~ file.
+
+    #+begin_src sh :tangle bin/init_central_admin.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<script_header>>
+
+      REFERENCE_READER=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"referenceDataReader:\")) | .key" config/central/participant-config.json)
+      CENTRAL_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"centralAdmin:\")) | .key" config/central/participant-config.json)
+
+      PARTIES_FILE=$(mktemp)
+      echo "{\"centralAdmin\":\"${CENTRAL_ADMIN}\",\"referenceDataReader\":\"${REFERENCE_READER}\"}" > $PARTIES_FILE
+
+      daml script \
+           --ledger-host localhost --ledger-port 5011 \
+           --access-token-file centralAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name CentralAdmin:initCentralAdmin
+
+      daml script \
+           --ledger-host localhost --ledger-port 5011 \
+           --access-token-file centralAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name CentralAdmin:createReferenceData
+
+      rm $PARTIES_FILE
+    #+end_src
+*** Start TraderOne Participant node
+    #+begin_src sh
+      docker compose up -d traderOne
+    #+end_src
+*** Transfer the referenceDataReader party to the TraderOne participant
+    For this step we'll need to execute a few canton administrative
+    commands on both participants. These steps implemented as
+    functions in [[file:config/central/canton.bootstrap][config/central/canton.bootstrap]] and
+    [[file:config/traderOne/canton.bootstrap][config/traderOne/canton.bootstrap]].
+
+    To execute these commands attach to the canton consoles running in
+    docker in two separate terminals or tmux windows:
+
+    #+begin_src sh
+      docker attach central
+      docker attach traderOne
+    #+end_src
+
+    Then execute the following canton commands:
+    - On *traderOne*: ~onboardParticipantStep1()~
+    - On *central*: ~downloadReferenceDataReaderACS()~
+    - On *traderOne*: ~onboardParticipantStep2()~
+
+    These steps will authorize the ~referenceDataReader~ party on the
+    ~traderOne~ participant and transfers its ACS. From this point,
+    the ~referenceDataReader~ party can be used on ~traderOne~. That
+    is, we can grant the *readAs referenceDataReader* rights to the
+    participant users.
+
+    The following three steps in one command
+
+    #+begin_src sh
+      ./bin/create_user_token.sh traderOne traderOneAdminUser && \
+      ./bin/propose_participant.sh && \
+      ./bin/onboard_participant.sh
+    #+end_src
+
+*** Create a JWT token for the traderOneAdminUser
+    ~./bin/create_user_token.sh traderOne traderOneAdminUser~
+
+    This step is the same as for the ~centralAdminUser~, but for
+    ~traderOne~ and ~traderOneAdminUser~.
+*** Create a ParticipantAdminRoleProposal contract for the traderOneAdmin party
+    ~./bin/propose_participant.sh~
+
+    Now we need to create the ~ParticipantAdminRoleProposal~ contract
+    by the ~tradeOneAdmin~ party. This proposal will create the
+    [[file:daml/ParticipantAdmin.daml][ParticipantAdminRole]] contract when accepted by the ~centralAdmin~
+    party.
+
+
+    #+begin_src sh :tangle bin/propose_participant.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<script_header>>
+
+      REFERENCE_READER=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"referenceDataReader:\")) | .key" config/traderOne/participant-config.json)
+      CENTRAL_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"centralAdmin:\")) | .key" config/traderOne/participant-config.json)
+      PARTICIPANT_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"traderOneAdmin:\")) | .key" config/traderOne/participant-config.json)
+
+      PARTIES_FILE=$(mktemp)
+      echo "{\"participantAdmin\":\"${PARTICIPANT_ADMIN}\",\"centralAdmin\":\"${CENTRAL_ADMIN}\",\"referenceDataReader\":\"${REFERENCE_READER}\"}" > $PARTIES_FILE
+
+      daml script \
+           --ledger-host localhost --ledger-port 5021 \
+           --access-token-file traderOneAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name ParticipantAdmin:proposeParticipant
+
+      rm $PARTIES_FILE
+    #+end_src
+*** Onboard the tradeOne ParticipantAdminRole by accepting the role proposal
+    ~./bin/onboard_participant.sh~
+
+    To accept the above proposal by the ~centralAdmin~ party:
+
+    #+begin_src sh :tangle bin/onboard_participant.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<script_header>>
+
+      REFERENCE_READER=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"referenceDataReader:\")) | .key" config/traderOne/participant-config.json)
+      CENTRAL_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"centralAdmin:\")) | .key" config/traderOne/participant-config.json)
+      PARTICIPANT_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"traderOneAdmin:\")) | .key" config/traderOne/participant-config.json)
+
+      PARTIES_FILE=$(mktemp)
+      echo "{\"participantAdmin\":\"${PARTICIPANT_ADMIN}\",\"centralAdmin\":\"${CENTRAL_ADMIN}\",\"referenceDataReader\":\"${REFERENCE_READER}\"}" > $PARTIES_FILE
+
+      daml script \
+           --ledger-host localhost --ledger-port 5011 \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --access-token-file centralAdminUser.jwt \
+           --input-file $PARTIES_FILE \
+           --script-name CentralAdmin:onboardParticipant
+
+      rm $PARTIES_FILE
+    #+end_src
+*** Then we can create some trades
+
+    #+begin_src sh :tangle bin/create_trade.sh :shebang "#!/usr/bin/env bash" :noweb strip-export
+      <<script_header>>
+
+      REFERENCE_READER=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"referenceDataReader:\")) | .key" config/traderOne/participant-config.json)
+      CENTRAL_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"centralAdmin:\")) | .key" config/traderOne/participant-config.json)
+      PARTICIPANT_ADMIN=$(jq -r ".party_participants | to_entries | .[] | select(.key | startswith(\"traderOneAdmin:\")) | .key" config/traderOne/participant-config.json)
+
+      PARTIES_FILE=$(mktemp)
+      echo "{\"participantAdmin\":\"${PARTICIPANT_ADMIN}\",\"centralAdmin\":\"${CENTRAL_ADMIN}\",\"referenceDataReader\":\"${REFERENCE_READER}\"}" > $PARTIES_FILE
+
+      echo "Creating a trade...."
+
+      daml script \
+           --ledger-host localhost --ledger-port 5021 \
+           --access-token-file traderOneAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name ParticipantAdmin:createTrade
+
+      echo "Creating a trade2...."
+
+      daml script \
+           --ledger-host localhost --ledger-port 5021 \
+           --access-token-file traderOneAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name ParticipantAdmin:createTrade2
+
+      echo "Creating a trade, but it will fail....."
+
+      daml script \
+           --ledger-host localhost --ledger-port 5021 \
+           --access-token-file traderOneAdminUser.jwt \
+           --dar .daml/dist/public-party-0.0.1.dar \
+           --input-file $PARTIES_FILE \
+           --script-name ParticipantAdmin:createTradeFail
+
+      rm $PARTIES_FILE
+
+    #+end_src
+
+* Questions
+** Paricipant can act as referenceDataReader
+   Can we simply assign *actAs referenceDataReader* in a participant,
+   without permission from central?

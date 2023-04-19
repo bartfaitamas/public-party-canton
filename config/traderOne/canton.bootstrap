@@ -1,0 +1,58 @@
+// -*- scala -*-
+
+traderOne.domains.connect_local(multiNodeDemo)
+
+// upload dar first
+traderOne.dars.upload("/dars/public-party-0.0.1.dar")
+
+// create participant party and user
+traderOne.ledger_api.parties.allocate("traderOneAdmin", "traderOneAdmin").party
+val traderOneAdmin       = traderOne.parties.find("traderOneAdmin")
+val referenceDataReader  = central.parties.find("referenceDataReader")
+val centralAdmin         = central.parties.find("centralAdmin")
+
+
+def onboardParticipantStep1() = {
+  traderOne.topology.party_to_participant_mappings.authorize(
+    TopologyChangeOp.Add,
+    referenceDataReader,
+    traderOne.id,
+    RequestSide.To,
+    ParticipantPermission.Observation)
+  central.topology.party_to_participant_mappings.authorize(
+    TopologyChangeOp.Add,
+    referenceDataReader,
+    traderOne.id,
+    RequestSide.From,
+    ParticipantPermission.Observation)
+
+  show("Hosting referenceDataReader party on this participant node is authorized. This node is now disconnected from the domain.")
+  show("To continue the onboarding, execute the following command on the central node:")
+  show("downloadReferenceDataReaderACS")
+}
+
+def onboardParticipantStep2() = {
+  // This step is needed, otherwise an error is thrown stating that `participant` is still connected.
+  traderOne.domains.disconnect_all()
+  repair.party_migration.step2_import_acs(traderOne, "/migration/referenceDataReader.acs.gz")
+  traderOne.domains.reconnect_all()
+
+  show("referenceDataReader party and its ACS is authorized on this participant node.")
+
+  val traderOneAdminUser = traderOne.ledger_api.users.create(
+    id = "traderOneAdminUser",
+    actAs = Set(traderOneAdmin.toLf),
+    readAs = Set(referenceDataReader.toLf),
+    primaryParty = Some(traderOneAdmin.toLf),
+    participantAdmin = false,
+    isActive = true)
+
+  show("traderOneAdminUser is created. Create the ParticipantAdminRoleProposal with scripts")
+}
+
+utils.generate_daml_script_participants_conf(
+  file=Some("/config/participant-config.json"),
+  defaultParticipant=Some(traderOne)
+)
+
+show("ParticipantA is started. To start the onboarding process, call 'onboardParticipantStep1()'")

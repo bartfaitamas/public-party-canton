@@ -1,0 +1,10 @@
+module Trade where
+
+template Trade with
+    participantAdmin : Party
+    meterId : Text
+    tradeId : Text
+  where
+    signatory participantAdmin
+    key (participantAdmin, meterId, tradeId) : (Party, Text, Text)
+    maintainer key._1

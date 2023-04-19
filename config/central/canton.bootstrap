@@ -1,0 +1,35 @@
+// -*- scala -*-
+
+central.domains.connect_local(multiNodeDemo)
+
+// create parties and users
+val centralAdmin        = central.ledger_api.parties.allocate("centralAdmin", "centralAdmin").party
+val referenceDataReader = central.ledger_api.parties.allocate("referenceDataReader", "referenceDataReader").party
+
+val centralAdminUser = central.ledger_api.users.create(
+  id = "centralAdminUser",
+  actAs = Set(centralAdmin, referenceDataReader),
+  readAs = Set(),
+  primaryParty = Some(centralAdmin),
+  participantAdmin = false,
+  isActive = true)
+
+// upload the dar
+central.dars.upload("/dars/public-party-0.0.1.dar")
+
+// support functions for participant onboarding
+def downloadReferenceDataReaderACS() = {
+  show(s"Downloading referenceDataReader ACS...")
+
+  val referenceDataReader = multiNodeDemo.parties.list().find(x => x.party.toString.contains("referenceDataReader")).get.party
+  val timestamp = central.topology.party_to_participant_mappings.list(filterStore = "multiNodeDemo", filterParty = "referenceDataReader").map(_.context.validFrom).max
+  central.repair.download(Set(referenceDataReader), "/migration/referenceDataReader.acs.gz", filterDomainId = "multiNodeDemo", timestamp = Some(timestamp))
+
+  show("referenceDataReader ACS is downloaded to '/migration/referenceDataReader.acs.gz'")
+  show("now execute `onboardParticipantStep2()` on the participant's canton console")
+}
+
+utils.generate_daml_script_participants_conf(
+  file=Some("/config/participant-config.json"),
+  defaultParticipant=Some(central)
+)

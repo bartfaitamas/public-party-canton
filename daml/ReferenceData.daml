@@ -1,0 +1,11 @@
+module ReferenceData where
+
+template Meter with
+    id : Text
+    centralAdmin : Party
+    reader : Party
+  where
+    signatory centralAdmin
+    key (centralAdmin, id) : (Party, Text)
+    maintainer key._1
+    observer reader

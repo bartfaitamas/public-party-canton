@@ -1,0 +1,78 @@
+module ParticipantAdmin where
+
+import Daml.Script
+import DA.Functor (void)
+
+import Trade
+import ReferenceData
+
+template ParticipantAdminRole with
+    centralAdmin : Party
+    participantAdmin : Party
+  where
+    signatory centralAdmin, participantAdmin
+    key participantAdmin : Party
+    maintainer key
+
+    nonconsuming choice CreateTrade : ContractId Trade with
+        meterId : Text
+        tradeId : Text
+      controller participantAdmin
+      do
+          optMeter <- lookupByKey @Meter (centralAdmin, meterId)
+          case optMeter of
+            Some meter -> create Trade with ..
+            None -> abort $ "Meter not found: " <> meterId
+
+    -- nonconsuming choice CreateTrade2 : ContractId Trade with
+    --     meterId : Text
+    --     tradeId : Text
+    --   controller participantAdmin, referenceDataReader
+    --   do
+    --       optMeter <- lookupByKey @Meter (referenceDataReader, meterId)
+    --       case optMeter of
+    --         Some meter -> create Trade with ..
+    --         None -> abort $ "Meter not found: " <> meterId
+
+template ParticipantAdminRoleProposal with
+    participantAdmin : Party
+    centralAdmin : Party
+    referenceDataReader : Party
+  where
+    signatory participantAdmin
+    key participantAdmin : Party
+    maintainer key
+    observer centralAdmin, referenceDataReader
+
+    choice Accept : ContractId ParticipantAdminRole with
+        controller centralAdmin, referenceDataReader
+        do create ParticipantAdminRole with ..
+
+data Parties = Parties with
+    centralAdmin       : Party
+    referenceDataReader : Party
+    participantAdmin : Party
+
+proposeParticipant : Parties -> Script ()
+proposeParticipant Parties{..} = void
+    $ submit participantAdmin
+    $ createCmd
+    $ ParticipantAdminRoleProposal with ..
+
+createTrade : Parties -> Script ()
+createTrade Parties{..} = void
+  $ submitMulti [participantAdmin] [referenceDataReader]
+  $ exerciseByKeyCmd @ParticipantAdminRole participantAdmin
+  $ CreateTrade "meter1" "trade1"
+
+-- createTrade2 : Parties -> Script ()
+-- createTrade2 Parties{..} = void
+--   $ submitMulti [participantAdmin, referenceDataReader] []
+--   $ exerciseByKeyCmd @ParticipantAdminRole participantAdmin
+--   $ CreateTrade2 "meter1" "trade1"
+
+createTradeFail : Parties -> Script ()
+createTradeFail Parties{..} = void
+  $ submit participantAdmin
+  $ exerciseByKeyCmd @ParticipantAdminRole participantAdmin
+  $ CreateTrade "meter1" "trade2"

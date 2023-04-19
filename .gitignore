@@ -1,0 +1,9 @@
+/.daml
+/log
+navigator.log
+/.metals/
+*.jwt
+*.crt
+*.key
+participant-config.json
+/.migration/*

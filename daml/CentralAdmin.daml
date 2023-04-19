@@ -1,0 +1,53 @@
+module CentralAdmin where
+
+import Daml.Script
+import DA.Functor (void)
+
+import ReferenceData
+import ParticipantAdmin (ParticipantAdminRoleProposal, Accept(..))
+
+template CentralAdminRole with
+    centralAdmin : Party
+    referenceDataReader : Party
+  where
+    signatory centralAdmin, referenceDataReader
+    key centralAdmin : Party
+    maintainer key
+
+    nonconsuming choice Create_Meter : ContractId Meter with
+        id : Text
+      controller centralAdmin
+      do create Meter with id; centralAdmin; reader = referenceDataReader
+
+    nonconsuming choice Approve_ParticipantAdminRoleProposal : () with
+        controller centralAdmin
+        do
+
+          pure ()
+
+data Parties = Parties with
+    centralAdmin : Party
+    referenceDataReader : Party
+
+
+initCentralAdmin : Parties -> Script ()
+initCentralAdmin Parties{..} = void
+    $ submitMulti [centralAdmin, referenceDataReader] []
+    $ createCmd
+    $ CentralAdminRole with ..
+
+createReferenceData : Parties -> Script ()
+createReferenceData Parties{..} = void
+    $ submitMulti [centralAdmin, referenceDataReader] []
+    $ exerciseByKeyCmd @CentralAdminRole centralAdmin
+    $ Create_Meter "meter1"
+
+data OnboardParticipantArgs = OnboardParticipantArgs with
+    centralAdmin : Party
+    referenceDataReader : Party
+    participantAdmin : Party
+
+onboardParticipant : OnboardParticipantArgs -> Script ()
+onboardParticipant OnboardParticipantArgs{..} = void
+    $ submitMulti [centralAdmin,referenceDataReader] []
+    $ exerciseByKeyCmd @ParticipantAdminRoleProposal participantAdmin Accept
